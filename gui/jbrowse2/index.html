@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JBrowse2 (Embedded)</title>
+  <script
+    src="https://unpkg.com/@jbrowse/react-linear-genome-view2@3.5.0/dist/react-linear-genome-view.umd.production.min.js"
+    crossorigin></script>
+  <style>
+    :root {
+      --accent: #00d4aa;
+      --bg: #1e1e2e;
+      --panel: #252540;
+      --border: #313244;
+      --text: #cdd6f4;
+      --subtext: #a6adc8;
+      --sans: "Segoe UI", Inter, Arial, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+
+    header {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    button {
+      background: linear-gradient(180deg, #45475a, #313244);
+      border: 1px solid #585b70;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    button:hover {
+      background: linear-gradient(180deg, #585b70, #45475a);
+      border-color: var(--accent);
+      color: #fff
+    }
+
+    select {
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--subtext)
+    }
+
+    #viewer {
+      height: calc(100vh - 56px);
+    }
+
+    .sp {
+      flex: 1
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--bg)
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #45475a;
+      border-radius: 4px
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--accent)
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <strong>JBrowse2</strong>
+    <button id="btnFasta">Load FASTA</button>
+    <button id="btnPrimers">Load Primer3 JSON</button>
+    <span class="hint">Pair:</span>
+    <select id="pairSel" disabled></select>
+    <span class="sp"></span>
+    <span class="hint" id="meta">—</span>
+  </header>
+
+  <div id="viewer"></div>
+
+  <input id="fastaFile" type="file" accept=".fa,.fasta,.fna,.txt" style="display:none" />
+  <input id="primerFile" type="file" accept=".json" style="display:none" />
+
+  <script>
+    let fasta = null;
+    let primerData = null;
+
+    const { React, createRoot, createViewState, JBrowseLinearGenomeView } =
+      JBrowseReactLinearGenomeView;
+
+    const root = createRoot(document.getElementById('viewer'));
+
+    function parseFasta(text) {
+      const lines = text.split(/\r?\n/).filter(x => x.trim().length > 0);
+      let h = "", s = [];
+      for (const ln of lines) {
+        if (ln.startsWith(">")) { if (!h) h = ln.substring(1).trim(); }
+        else s.push(ln.trim());
+      }
+      return { header: h, seq: s.join("").toUpperCase() };
+    }
+
+    function safeRefName(h) {
+      if (!h) return "template";
+      const x = h.split(/\s+/)[0].replace(/[^A-Za-z0-9_.-]/g, "_");
+      return x || "template";
+    }
+
+    function parsePosLen(s) {
+      if (!s) return null;
+      const parts = ("" + s).split(",").map(x => parseInt(x.trim(), 10));
+      if (parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
+      return { start0: parts[0], len: parts[1] };
+    }
+
+    function primerPairsToFeatures(pairIdx) {
+      if (!primerData || !primerData.pairs || !fasta) return [];
+      const p = primerData.pairs[pairIdx];
+      if (!p) return [];
+      const features = [];
+      const refName = fasta.refName;
+      const lp = parsePosLen(p.left_pos);
+      const rp = parsePosLen(p.right_pos);
+      if (lp) {
+        features.push({ refName, uniqueId: `fwd_${pairIdx}`, start: lp.start0, end: lp.start0 + lp.len, name: `FWD (pair ${p.pair ?? pairIdx})`, strand: 1 });
+      }
+      if (rp) {
+        features.push({ refName, uniqueId: `rev_${pairIdx}`, start: rp.start0, end: rp.start0 + rp.len, name: `REV (pair ${p.pair ?? pairIdx})`, strand: -1 });
+      }
+      if (lp && rp) {
+        const a1 = Math.min(lp.start0, rp.start0);
+        const a2 = Math.max(lp.start0 + lp.len, rp.start0 + rp.len);
+        features.push({ refName, uniqueId: `amp_${pairIdx}`, start: a1, end: a2, name: `Amplicon (~${p.product_size ?? "?"} bp)`, strand: 0 });
+      }
+      return features;
+    }
+
+    function render(pairIdx = 0) {
+      if (!fasta) {
+        root.render(React.createElement('div', { style: { padding: '12px', fontFamily: 'var(--sans)', color: 'var(--subtext)' } },
+          'Load a FASTA file to initialize the viewer.'
+        ));
+        return;
+      }
+      const refName = fasta.refName;
+      const len = fasta.seq.length;
+      const features = primerData ? primerPairsToFeatures(pairIdx) : [];
+      const state = new createViewState({
+        assembly: {
+          name: 'template',
+          sequence: {
+            type: 'ReferenceSequenceTrack', trackId: 'template_seq',
+            adapter: { type: 'FromConfigSequenceAdapter', features: [{ refName, uniqueId: refName, start: 0, end: len, seq: fasta.seq }] },
+          },
+        },
+        tracks: [
+          ...(features.length ? [{ type: 'FeatureTrack', trackId: 'primers', name: 'Primers', assemblyNames: ['template'], category: ['Primers'], adapter: { type: 'FromConfigAdapter', features } }] : []),
+        ],
+        defaultSession: {
+          name: 'Session',
+          view: {
+            id: 'linearGenomeView', type: 'LinearGenomeView',
+            init: { assembly: 'template', loc: `${refName}:1..${Math.min(len, 500)}`, tracks: features.length ? ['primers'] : [] },
+          },
+        },
+      });
+      root.render(React.createElement(JBrowseLinearGenomeView, { viewState: state }));
+      document.getElementById("meta").textContent = `${refName} | len=${len}` + (primerData ? ` | pairs=${(primerData.pairs || []).length}` : "");
+    }
+
+    function setPairOptions() {
+      const sel = document.getElementById("pairSel");
+      sel.innerHTML = "";
+      if (!primerData || !primerData.pairs) { sel.disabled = true; return; }
+      primerData.pairs.forEach((p, idx) => {
+        const opt = document.createElement("option");
+        opt.value = idx;
+        opt.textContent = `Pair ${p.pair ?? idx} (amplicon ${p.product_size ?? "?"} bp)`;
+        sel.appendChild(opt);
+      });
+      sel.disabled = primerData.pairs.length === 0;
+      if (primerData.pairs.length) { sel.value = "0"; render(0); }
+    }
+
+    document.getElementById("btnFasta").onclick = () => document.getElementById("fastaFile").click();
+    document.getElementById("btnPrimers").onclick = () => document.getElementById("primerFile").click();
+
+    document.getElementById("fastaFile").addEventListener("change", async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const text = await f.text();
+      const r = parseFasta(text);
+      fasta = { header: r.header, seq: r.seq, refName: safeRefName(r.header) };
+      render(0);
+    });
+
+    document.getElementById("primerFile").addEventListener("change", async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const js = JSON.parse(await f.text());
+      if (!js || !Array.isArray(js.pairs)) { alert("Unsupported primers JSON."); return; }
+      primerData = js; setPairOptions();
+    });
+
+    document.getElementById("pairSel").addEventListener("change", (e) => { render(parseInt(e.target.value, 10)); });
+
+    render(0);
+  </script>
+</body>
+
+</html>

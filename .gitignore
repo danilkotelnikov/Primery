@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments & embedded runtimes
+python_embed/
+.venv/
+venv/
+env/
+
+# Species / project data folders
+Coronocyclus_coronatus/
+Cyathostomum_nassatus/
+Fusarium_bulbicola/
+Fusarium_culmorum/
+Parascaris_equorum/
+
+# Obsidian vault internals
+.obsidian/
+
+# Sisyphus automation state
+.sisyphus/
+
+# Manuscript (LaTeX source, PDFs, supplementary)
+docs/manuscript/
+
+# Internal notes & scratch files
+findings.md
+progress.md
+task_plan.md
+excalidraw.log
+
+# Claude Code
+.claude/
+
+# Data / cache
+data-gym-cache/
+*.dll
+*.node
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

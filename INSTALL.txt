@@ -1,0 +1,24 @@
+HOW TO INSTALL AND RUN PRIMERY (PORTABLE)
+=========================================
+
+This application is fully portable. You do NOT need to install Python on your computer manually.
+
+Installation (One-Time):
+-----------------------
+1. Double-click "install.bat".
+   * A blue/black window will open.
+   * It will automatically download a standalone Python version and all required libraries.
+   * This might take a minute or two depending on your internet connection.
+   * Wait until you see "Installation Successful!".
+   * Press any key to close the window.
+
+Running the App:
+---------------
+1. Double-click "run.bat".
+   * The app will launch immediately.
+   * No black window will stay open.
+
+Troubleshooting:
+---------------
+- If "install.bat" fails, check your internet connection and try running "clean_install.bat" first, then "install.bat" again.
+- If the app doesn't open, double-click "debug.bat" to see any error messages.

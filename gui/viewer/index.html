@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Sequence Viewer</title>
+<style>
+  :root{
+    --accent:#00d4aa;
+    --bg:#1e1e2e;
+    --panel:#252540;
+    --border:#313244;
+    --text:#cdd6f4;
+    --subtext:#a6adc8;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: "Segoe UI", Inter, Arial, sans-serif;
+  }
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);}
+  header{display:flex;gap:10px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);}
+  button{
+    background:linear-gradient(180deg,#45475a,#313244);border:1px solid #585b70;border-radius:8px;padding:6px 10px;cursor:pointer;color:var(--text);font-weight:500;
+  }
+  button:hover{background:linear-gradient(180deg,#585b70,#45475a);border-color:var(--accent);color:#fff}
+  .wrap{display:grid;grid-template-columns: 340px 1fr; height: calc(100vh - 52px);}
+  .left{border-right:1px solid var(--border); padding:10px; overflow:auto;}
+  .main{padding:10px; overflow:auto;}
+  .box{border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px;background:var(--panel);}
+  .label{font-size:12px;color:var(--subtext);margin-bottom:6px;}
+  .mono{font-family:var(--mono); font-size: 12px; line-height: 1.35; color: var(--text);}
+  .seqline{white-space: pre;}
+  .hlF{background: rgba(0, 212, 170, .25); border-radius:4px; padding:0 1px;}
+  .hlR{background: rgba(251, 191, 36, .25); border-radius:4px; padding:0 1px;}
+  .hlAmp{background: rgba(148, 163, 184, .15); border-radius:4px; padding:0 1px;}
+  .track{height:70px;border:1px solid var(--border);border-radius:10px; background:var(--panel); position:relative; overflow:hidden;}
+  .bar{position:absolute;bottom:0;width:2px;background:var(--accent);}
+  .axis{font-size:11px;color:var(--subtext)}
+  select,input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);}
+  select:focus,input:focus{border-color:var(--accent);outline:none;}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:#45475a;border-radius:4px}
+  ::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <strong>Sequence Viewer</strong>
+  <button id="btnLoad">Load FASTA</button>
+  <button id="btnLoadMismatch">Load mismatch-map JSON</button>
+  <button id="btnLoadPrimers">Load Primer3 JSON</button>
+  <span class="axis" id="info"></span>
+</header>
+
+<div class="wrap">
+  <div class="left">
+    <div class="box">
+      <div class="label">Primer overlay</div>
+      <select id="pairSel" disabled></select>
+      <div style="height:8px"></div>
+      <div class="axis" id="primerInfo">Load Primer3 JSON (primer3_pairs.json) to overlay primer sites.</div>
+      <div class="axis" style="margin-top:6px">
+        Colors: <span style="background:rgba(0,212,170,.25);padding:2px 6px;border-radius:6px;border:1px solid var(--border)">FWD</span>
+        <span style="background:rgba(251,191,36,.25);padding:2px 6px;border-radius:6px;border:1px solid var(--border)">REV</span>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="label">Selection</div>
+      <div class="mono" id="sel">—</div>
+    </div>
+
+    <div class="box">
+      <div class="label">Find motif</div>
+      <input id="motif" placeholder="e.g. ATGCGT"/>
+      <div style="height:8px"></div>
+      <button id="btnFind">Find</button>
+      <div class="axis" id="findRes" style="margin-top:8px"></div>
+    </div>
+
+    <div class="box">
+      <div class="label">Mismatch density (non-target species %)</div>
+      <div class="track" id="track"></div>
+      <div class="axis" id="trackMeta" style="margin-top:6px">Load mismatch-map JSON to view track.</div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="box">
+      <div class="label">FASTA</div>
+      <div class="mono" id="fastaHead">—</div>
+    </div>
+    <div class="box">
+      <div class="label">Sequence</div>
+      <div class="mono" id="seq"></div>
+    </div>
+  </div>
+</div>
+
+<input id="file" type="file" accept=".fa,.fasta,.fna,.txt" style="display:none"/>
+<input id="fileMismatch" type="file" accept=".json" style="display:none"/>
+<input id="filePrimers" type="file" accept=".json" style="display:none"/>
+
+<script>
+let header="", seq="";
+let mismatch = null;
+let primerData = null;
+let highlight = {fwd:null, rev:null, amp:null};
+
+function parseFasta(text){
+  const lines = text.split(/\r?\n/).filter(x=>x.trim().length>0);
+  let h="", s=[];
+  for(const ln of lines){
+    if(ln.startsWith(">")){if(!h)h=ln.substring(1).trim();}
+    else s.push(ln.trim());
+  }
+  return {header:h, seq:s.join("").toUpperCase()};
+}
+
+function applyHighlightsToChunk(chunk, chunkStart1){
+  const ranges = [];
+  if(highlight.amp) ranges.push({s:highlight.amp[0], e:highlight.amp[1], cls:"hlAmp"});
+  if(highlight.fwd) ranges.push({s:highlight.fwd[0], e:highlight.fwd[1], cls:"hlF"});
+  if(highlight.rev) ranges.push({s:highlight.rev[0], e:highlight.rev[1], cls:"hlR"});
+  if(!ranges.length) return chunk.replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  let out = "";
+  for(let i=0;i<chunk.length;i++){
+    const p1 = chunkStart1 + i;
+    let cls = null;
+    for(const r of ranges){ if(p1>=r.s && p1<=r.e){ cls = r.cls; } }
+    const ch = chunk[i];
+    out += cls ? `<span class="${cls}">${ch}</span>` : ch;
+  }
+  return out;
+}
+
+function renderSeq(){
+  const el = document.getElementById("seq");
+  el.innerHTML = "";
+  if(!seq) return;
+  const width = 60;
+  for(let i=0;i<seq.length;i+=width){
+    const chunk = seq.slice(i,i+width);
+    const pos1 = i+1;
+    const posLabel = (pos1).toString().padStart(8," ");
+    const line = document.createElement("div");
+    line.className="seqline";
+    line.innerHTML = `${posLabel}  ${applyHighlightsToChunk(chunk, pos1)}`;
+    el.appendChild(line);
+  }
+  document.getElementById("info").textContent = `len=${seq.length}`;
+}
+
+function renderMismatchTrack(){
+  const track = document.getElementById("track");
+  track.innerHTML = "";
+  if(!mismatch || !seq) return;
+  const W = track.clientWidth, H = track.clientHeight;
+  const L = seq.length;
+  const perPos = mismatch.per_pos || [];
+  const map = new Map(perPos.map(o=>[o.pos, o.pct]));
+  const step = Math.max(1, Math.floor(L/800));
+  for(let i=1;i<=L;i+=step){
+    let maxPct = 0;
+    for(let j=i;j<i+step && j<=L;j++){
+      const p = map.get(j);
+      if(p!==undefined && p>maxPct) maxPct = p;
+    }
+    const x = Math.floor((i-1)/L * W);
+    const h = Math.max(1, Math.floor((maxPct/100) * H));
+    const bar = document.createElement("div");
+    bar.className="bar";
+    bar.style.left = `${x}px`;
+    bar.style.height = `${h}px`;
+    track.appendChild(bar);
+  }
+  document.getElementById("trackMeta").textContent = `mismatch positions: ${perPos.length}, total species: ${mismatch.total_species ?? "?"}`;
+}
+
+function findMotif(){
+  const motif = document.getElementById("motif").value.trim().toUpperCase();
+  if(!motif || !seq) return;
+  const idxs = [];
+  let i = 0;
+  while(true){
+    const k = seq.indexOf(motif, i);
+    if(k<0) break;
+    idxs.push(k+1);
+    i = k+1;
+    if(idxs.length>2000) break;
+  }
+  document.getElementById("findRes").textContent = idxs.length
+    ? `Found ${idxs.length} matches, first: ${idxs.slice(0,10).join(", ")}`
+    : "No matches";
+}
+
+function parsePrimer3Json(js){
+  if(js && js.pairs && Array.isArray(js.pairs)) return js;
+  if(js && js.meta && js.pairs) return js;
+  return null;
+}
+
+function setPairOptions(){
+  const sel = document.getElementById("pairSel");
+  sel.innerHTML = "";
+  if(!primerData){ sel.disabled=true; return; }
+  const pairs = primerData.pairs || [];
+  pairs.forEach((p, idx)=>{
+    const opt = document.createElement("option");
+    opt.value = idx;
+    opt.textContent = `Pair ${p.pair ?? idx} (amplicon ${p.product_size ?? "?"} bp)`;
+    sel.appendChild(opt);
+  });
+  sel.disabled = pairs.length===0;
+  if(pairs.length>0){ sel.value = "0"; applyPair(0); }
+}
+
+function parsePosLen(s){
+  if(!s) return null;
+  const parts = (""+s).split(",").map(x=>parseInt(x.trim(),10));
+  if(parts.length<2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
+  return {start0: parts[0], len: parts[1]};
+}
+
+function applyPair(idx){
+  if(!primerData || !seq) return;
+  const pairs = primerData.pairs || [];
+  const p = pairs[idx];
+  if(!p) return;
+  const lp = parsePosLen(p.left_pos);
+  const rp = parsePosLen(p.right_pos);
+  highlight = {fwd:null, rev:null, amp:null};
+  if(lp){ highlight.fwd = [lp.start0+1, lp.start0+lp.len]; }
+  if(rp){ highlight.rev = [rp.start0+1, rp.start0+rp.len]; }
+  if(highlight.fwd && highlight.rev){
+    highlight.amp = [Math.min(highlight.fwd[0],highlight.rev[0]), Math.max(highlight.fwd[1],highlight.rev[1])];
+  }
+  document.getElementById("primerInfo").textContent = `FWD: ${p.left ?? ""} @ ${highlight.fwd?highlight.fwd.join("-"):"?"} | REV: ${p.right ?? ""} @ ${highlight.rev?highlight.rev.join("-"):"?"}`;
+  renderSeq();
+}
+
+document.getElementById("btnLoad").onclick = ()=>document.getElementById("file").click();
+document.getElementById("btnLoadMismatch").onclick = ()=>document.getElementById("fileMismatch").click();
+document.getElementById("btnLoadPrimers").onclick = ()=>document.getElementById("filePrimers").click();
+document.getElementById("btnFind").onclick = findMotif;
+
+document.getElementById("file").addEventListener("change", async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const text = await f.text();
+  const r = parseFasta(text);
+  header = r.header; seq = r.seq;
+  document.getElementById("fastaHead").textContent = header || "(no header)";
+  highlight = {fwd:null, rev:null, amp:null};
+  renderSeq(); renderMismatchTrack();
+});
+document.getElementById("fileMismatch").addEventListener("change", async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  mismatch = JSON.parse(await f.text());
+  renderMismatchTrack();
+});
+document.getElementById("filePrimers").addEventListener("change", async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const js = JSON.parse(await f.text());
+  const p3 = parsePrimer3Json(js);
+  if(!p3){ alert("Unsupported primers JSON."); return; }
+  primerData = p3; setPairOptions();
+});
+document.getElementById("pairSel").addEventListener("change", (e)=>{ applyPair(parseInt(e.target.value,10)); });
+document.addEventListener("mouseup", ()=>{
+  const sel = window.getSelection();
+  if(!sel) return;
+  const s = sel.toString().trim();
+  document.getElementById("sel").textContent = s ? s.substring(0,200) : "—";
+});
+</script>
+</body>
+</html>
