@@ -17,12 +17,23 @@ class SelectionDialog(QDialog):
     Dialog to select Organisms and Genes.
     returns: list of {"organism": str, "genes": [str]}
     """
-    def __init__(self, workspace, title="Select Targets", parent=None):
+    def __init__(
+        self,
+        workspace,
+        title="Select Targets",
+        parent=None,
+        organism_filter=None,
+        checked_genes=None,
+        default_checked=True,
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumSize(400, 500)
         self.workspace = workspace
         self.selections = []
+        self.organism_filter = organism_filter
+        self.checked_genes = set(checked_genes or [])
+        self.default_checked = default_checked
 
         layout = QVBoxLayout(self)
 
@@ -63,6 +74,8 @@ class SelectionDialog(QDialog):
             return
 
         for entry in sorted(os.listdir(ws)):
+            if self.organism_filter and entry != self.organism_filter:
+                continue
             org_path = os.path.join(ws, entry)
             # Check if it looks like an organism folder (has Genes or BLAST)
             if not os.path.isdir(org_path) or entry.startswith("."):
@@ -82,23 +95,31 @@ class SelectionDialog(QDialog):
                 for g in os.listdir(blast_dir):
                     if os.path.isdir(os.path.join(blast_dir, g)):
                         found_genes.add(g)
-            
-            # If no BLAST results, maybe check Genes folder? 
-            # (Use case: Specificity might want to choose just a gene to load primers for, 
-            # but primers are in BLAST folder anyway).
+            if os.path.isdir(genes_dir):
+                for g in os.listdir(genes_dir):
+                    if os.path.isdir(os.path.join(genes_dir, g)):
+                        found_genes.add(g)
             
             if not found_genes:
                 continue
 
             item = QTreeWidgetItem([entry])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
-            item.setCheckState(0, Qt.Checked)
+            item.setCheckState(0, Qt.Checked if self.default_checked else Qt.Unchecked)
             
             for g in sorted(found_genes):
                 child = QTreeWidgetItem([g])
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
-                child.setCheckState(0, Qt.Checked)
+                checked = self.default_checked or g in self.checked_genes
+                child.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
                 item.addChild(child)
+
+            if self.checked_genes:
+                any_checked = any(
+                    item.child(i).checkState(0) == Qt.Checked
+                    for i in range(item.childCount())
+                )
+                item.setCheckState(0, Qt.Checked if any_checked else Qt.Unchecked)
             
             self.tree.addTopLevelItem(item)
 

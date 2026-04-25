@@ -5,9 +5,9 @@
 [![PySide6](https://img.shields.io/badge/GUI-PySide6-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
 
-**Primery** is a bioinformatics desktop application for designing species-specific diagnostic primers. It automates the full workflow — from gene sequence retrieval to primer validation — through an intuitive PySide6 GUI, replacing what traditionally requires multiple disconnected tools and manual steps.
+**Primery** is a bioinformatics desktop application for designing species-specific diagnostic primers and mismatch-discriminating probes. It automates the full workflow — from gene sequence retrieval to primer/probe validation — through an intuitive PySide6 GUI, replacing what traditionally requires multiple disconnected tools and manual steps.
 
-The application targets researchers and diagnosticians who need primers that reliably amplify a **target organism** while avoiding cross-reactivity with closely related non-target species. Primery achieves this by analyzing BLAST mismatch patterns across homologous sequences, clustering discriminatory positions into primer landing zones, and scoring candidates by their species discrimination power.
+The application targets researchers and diagnosticians who need assays that reliably amplify a **target organism** while avoiding cross-reactivity with closely related non-target species. Primery achieves this by analyzing BLAST mismatch patterns across homologous sequences, clustering discriminatory positions into primer/probe landing zones, and scoring candidates by their species discrimination power.
 
 ---
 
@@ -15,13 +15,16 @@ The application targets researchers and diagnosticians who need primers that rel
 
 | Feature | Description |
 |---------|-------------|
-| **NCBI Integration** | Search and download gene/locus sequences from NCBI Nucleotide with automatic QC |
-| **BLAST Mismatch Analysis** | Identify positions where non-target species differ; cluster them into primer landing zones |
-| **Primer3 Design** | Cluster-pair design with mismatch-aware scoring and 3′ end bonus |
-| **Primer-BLAST Validation** | Check primer specificity against NCBI databases |
-| **Sequence Viewer** | Dark-themed viewer with mismatch heatmap, cluster regions, primer arrows, and amplicon brackets; JBrowse2 integration |
+| **NCBI Integration** | Search and download gene/locus sequences from NCBI Nucleotide with alias-aware grouping, examples, download statistics, and per-locus FASTA limits |
+| **BLAST Mismatch Analysis** | Identify positions where non-target species differ; cluster them into primer/probe landing zones with species, isolate/strain, genus, and clade/species-complex limits |
+| **Primer3 Design** | Cluster-pair design with mismatch-aware scoring, 3' terminal mismatch enforcement, and ambiguity-safe template handling |
+| **Probe Design** | TaqMan/qPCR, MGB-style, molecular beacon, and RPA/exo probe design with dye, quencher, and conservative LNA formatting |
+| **Assay Specificity** | Primer-BLAST validation plus probe-on-amplicon specificity classification |
+| **Sequence Viewer** | Dark-themed editable viewer with mismatch heatmap, cluster regions, nucleotide-resolution primer/probe arrows, amplicon brackets, and JBrowse2 integration |
+| **In-App Reviewers** | Primer table and specificity report viewers with filtering, sheet selection, and CSV export |
+| **Preferences** | Editor, application, analysis, and keyboard settings backed by Qt settings |
 | **Amplification Presets** | PCR · qPCR · RPA · NASBA · LAMP (outer primers) |
-| **Report Generation** | PDF and DOCX reports with colored tables and optional sequence maps |
+| **Report Generation** | PDF and DOCX reports with colored tables, primer/probe summary rows, specificity results, and optional sequence maps |
 | **Bilingual Interface** | Full English / Russian localization |
 
 ---
@@ -51,22 +54,33 @@ python primery_app.py
 
 ---
 
+## Release Notes And Feature Guide
+
+- Latest subrelease: **v0.2.0**.
+- Full change list: [CHANGELOG.md](CHANGELOG.md).
+- Practical guide to the new primer/probe workflows: [docs/feature_guidelines.md](docs/feature_guidelines.md).
+
+---
+
 ## Complete Workflow
 
 ```
 1. Download reference sequences
-   Organism name → Search NCBI → Select loci → Download Selected
+   Organism name → Search NCBI → Select loci → Set per-locus FASTA counts → Download Selected
 
 2. Analyze mismatch patterns
-   Analyze Specificity → Select organisms and genes → BLAST runs remotely
+   Analyze Specificity → Select organism/gene folders → Choose mismatch limit mode → BLAST runs remotely
 
 3. Design primers
-   Select preset (PCR / qPCR / RPA / NASBA / LAMP) → Design Primers → Review
+   Select preset (PCR / qPCR / RPA / NASBA / LAMP) → Select genes → Design 3'-mismatch-aware primers → Review
 
-4. Validate specificity
-   Enter primer sequences → Run Primer-BLAST → Check on/off-target amplicons
+4. Add probes when needed
+   Choose chemistry/dye/quencher → Design probes over informative mismatches → Review formatted order tables
 
-5. Generate report
+5. Validate specificity
+   Run Primer-BLAST → Evaluate primer hits → Align probes on amplicons → Review assay-level status
+
+6. Generate report
    Build HTML + PDF Report → Ready-to-share PDF or DOCX
 ```
 

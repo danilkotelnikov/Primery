@@ -23,12 +23,18 @@ Primery/
 │   ├── blast_mismatch_analyzer.py  # Low-level BLAST + mismatch tallying
 │   ├── primer_designer.py      # Cluster-pair Primer3 design
 │   ├── primer_specificity.py   # Primer-BLAST specificity checking
+│   ├── probe_catalog.py        # Probe dye/quencher/modification catalog
+│   ├── probe_designer.py       # qPCR, beacon, MGB-style, and RPA probe design
+│   ├── probe_specificity.py    # Primer + probe assay specificity classification
 │   └── report_generator.py     # PDF/DOCX report generation
 │
 ├── gui/                        # PySide6 user interface
 │   ├── __init__.py
 │   ├── main_window.py          # MainWindow with docks, toolbar, menu
 │   ├── sequence_viewer.py      # QGraphicsView sequence visualization
+│   ├── editor_widget.py        # Text/FASTA editor widgets
+│   ├── report_viewers.py       # In-app primer and specificity table viewers
+│   ├── settings_dialog.py      # Preferences dialog
 │   ├── workers.py              # BaseWorker QThread wrapper
 │   ├── gui_context.py          # Global state singleton
 │   ├── i18n.py                 # EN/RU string dictionary
@@ -46,6 +52,7 @@ Primery/
 │
 ├── docs/                       # Documentation
 │   ├── getting_started.md
+│   ├── feature_guidelines.md   # v0.2 primer/probe workflow guidance
 │   ├── user_manual.md
 │   ├── cli_reference.md
 │   ├── api_reference.md
@@ -54,6 +61,7 @@ Primery/
 │   ├── troubleshooting.md
 │   ├── developers.md
 │   └── science.md
+├── CHANGELOG.md                # Release notes
 │
 ├── _legacy/                    # CLI-only scripts (predecessor tools)
 │   ├── fusarium_pipeline.py

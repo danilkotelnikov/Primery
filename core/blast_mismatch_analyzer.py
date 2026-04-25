@@ -354,12 +354,28 @@ def build_query_anchored_seq(query_len: int, hsp: Dict) -> Tuple[List[str], int,
     return anchored, covered, used_cols
 
 
+def _normalize_limit_mode(value: Optional[str]) -> str:
+    mode = re.sub(r"\s+", " ", (value or "species").strip().lower())
+    mode = mode.replace(" / ", "/").replace("/ ", "/").replace(" /", "/")
+    if mode in {"isolate/strain", "isolates/strains", "isolate", "strain"}:
+        return "isolate"
+    if mode in {"clade/species complex", "species complex", "clade", "complex"}:
+        return "clade"
+    if mode == "genus":
+        return "genus"
+    if mode == "none":
+        return "none"
+    return "species"
+
+
 def tally_mismatches(
     query_seq: str,
     hits: List[HitInfo],
     *,
     target_sciname: Optional[str] = None,
     target_taxid: Optional[int] = None,
+    limit_mode: Optional[str] = "species",
+    excluded_scinames: Optional[Set[str]] = None,
     max_hits_used: int = 200,
     min_coverage_frac: float = 0.5,
 ) -> Tuple[Dict[int, Dict[str, int]], Dict[int, Dict[str, Set[str]]], List[Dict]]:
@@ -371,6 +387,9 @@ def tally_mismatches(
     """
     L = len(query_seq)
     target_sciname_norm = (target_sciname or "").strip().lower()
+    target_genus = target_sciname_norm.split()[0] if target_sciname_norm else ""
+    mode = _normalize_limit_mode(limit_mode)
+    excluded_norm = {s.strip().lower() for s in (excluded_scinames or set()) if s}
     counts: Dict[int, Dict[str, int]] = {}
     species: Dict[int, Dict[str, Set[str]]] = {}
     hits_rows: List[Dict] = []
@@ -380,10 +399,25 @@ def tally_mismatches(
         if used >= max_hits_used:
             break
         sciname_norm = (hi.sciname or "").strip().lower()
-        if target_taxid is not None and hi.taxid is not None and hi.taxid == target_taxid:
-            continue
-        if target_sciname_norm and sciname_norm == target_sciname_norm:
-            continue
+        same_species = bool(target_sciname_norm and sciname_norm == target_sciname_norm)
+        same_taxid = target_taxid is not None and hi.taxid is not None and hi.taxid == target_taxid
+        same_genus = bool(target_genus and sciname_norm.startswith(target_genus + " "))
+
+        if mode == "species":
+            if same_taxid or same_species or sciname_norm in excluded_norm:
+                continue
+        elif mode == "clade":
+            if same_taxid or same_species or sciname_norm in excluded_norm:
+                continue
+        elif mode == "genus":
+            if same_taxid or same_species or not same_genus:
+                continue
+        elif mode == "isolate":
+            # Keep same-species hits so isolate/strain markers can be discovered
+            # relative to the selected query/reference accession.
+            pass
+        elif mode == "none":
+            pass
 
         anchored, covered, _ = build_query_anchored_seq(L, hi.hsp)
         cov_frac = covered / max(1, L)

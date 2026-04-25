@@ -6,6 +6,7 @@ a comprehensive PDF / DOCX report.
 """
 import os
 import glob
+import re
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QGroupBox, QRadioButton, QLabel, QCheckBox,
@@ -106,14 +107,29 @@ class ReportDialog(QDialog):
                     continue
                 # Check for primers
                 primer_files = glob.glob(os.path.join(gene_blast, "*_primers.json"))
-                primer_label = ", ".join(
-                    os.path.basename(f).replace(f"{gene_name}_", "").replace("_primers.json", "")
-                    for f in primer_files
-                ) if primer_files else "—"
+                primer_methods = []
+                for f in primer_files:
+                    m = re.match(rf"^{re.escape(gene_name)}_(.+?)_primers\.json$", os.path.basename(f))
+                    primer_methods.append(m.group(1) if m else os.path.basename(f))
+                flat_probe_files = glob.glob(os.path.join(gene_blast, "*_probes.json"))
+                nested_probe_files = glob.glob(os.path.join(gene_blast, "Probes", "**", "*_probes.json"), recursive=True)
+                probe_file_map = {os.path.basename(p): p for p in sorted(flat_probe_files)}
+                for f in sorted(nested_probe_files):
+                    probe_file_map[os.path.basename(f)] = f
+                probe_files = list(probe_file_map.values())
+                for f in probe_files:
+                    m = re.match(rf"^{re.escape(gene_name)}_(.+?)_probes\.json$", os.path.basename(f))
+                    primer_methods.append((m.group(1) if m else os.path.basename(f)) + " probes")
+                primer_label = ", ".join(primer_methods) if primer_methods else "—"
                 
                 # Check for specificity
                 spec_dir = os.path.join(org_path, "Primer-BLAST")
-                spec_files = glob.glob(os.path.join(spec_dir, "PrimerBLAST_*.txt")) if os.path.isdir(spec_dir) else []
+                safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", gene_name).strip("_")
+                spec_re = re.compile(rf"^PrimerBLAST_{re.escape(safe_gene)}_(.+?)_\d{{8}}_\d{{6}}\.txt$")
+                spec_files = [
+                    f for f in glob.glob(os.path.join(spec_dir, "PrimerBLAST_*.txt"))
+                    if spec_re.match(os.path.basename(f))
+                ] if os.path.isdir(spec_dir) else []
                 spec_label = f"{len(spec_files)} report(s)" if spec_files else "—"
 
                 child = QTreeWidgetItem([gene_name, primer_label, spec_label])

@@ -20,10 +20,12 @@ import json, os
 # ═══════════════════════ Mismatch Dialog ════════════════════
 
 class MismatchDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, start_dir="", initial_path=""):
         super().__init__(parent)
         self.setWindowTitle("Mismatch Analysis Viewer")
         self.resize(800, 600)
+        self.start_dir = start_dir
+        self.initial_path = initial_path
 
         layout = QVBoxLayout(self)
 
@@ -40,17 +42,19 @@ class MismatchDialog(QDialog):
 
         self.btn_load_general.clicked.connect(self.load_general)
         self.btn_load_file.clicked.connect(self.load_specific)
+        if self.initial_path and os.path.exists(self.initial_path):
+            self._load_data(self.initial_path)
 
     def load_general(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open General Summary", "",
+            self, "Open General Summary", self.start_dir,
             "Excel Files (*.xlsx);;JSON (*.json)")
         if path:
             self._load_data(path)
 
     def load_specific(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Mismatch Summary", "",
+            self, "Open Mismatch Summary", self.start_dir,
             "Excel Files (*.xlsx);;JSON (*.json)")
         if path:
             self._load_data(path)
@@ -107,17 +111,20 @@ class PrimerSettingsDialog(QDialog):
     Supports loading preset values an updating live.
     """
 
-    def __init__(self, current_settings=None, preset_params=None, parent=None):
+    def __init__(self, current_settings=None, preset_params=None,
+                 current_probe_settings=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Advanced Primer Design Settings")
         self.setMinimumSize(520, 520)
 
         self.settings = current_settings or {}
+        self.probe_settings = current_probe_settings or {}
 
         main_layout = QVBoxLayout(self)
 
         # ── Tabs ──
         tabs = QTabWidget()
+        self.tabs = tabs
         main_layout.addWidget(tabs)
 
         # --- Primer Size & Tm tab ---
@@ -273,8 +280,75 @@ class PrimerSettingsDialog(QDialog):
         gb.addRow("Target Organism:", self.le_target_org)
 
         l4.addWidget(grp_blast)
+
+        grp_3p = QGroupBox("3' mismatch placement")
+        g3p = QFormLayout(grp_3p)
+        self.chk_require_3p = QCheckBox("Require mismatch near each primer 3' end")
+        self.chk_require_3p.setChecked(True)
+        g3p.addRow(self.chk_require_3p)
+        self.sp_3p_window = QSpinBox()
+        self.sp_3p_window.setRange(0, 5)
+        self.sp_3p_window.setValue(3)
+        g3p.addRow("Max offset from 3' end:", self.sp_3p_window)
+        l4.addWidget(grp_3p)
+
         l4.addStretch()
         tabs.addTab(tab_spec, "Specificity")
+
+        # --- Probe design tab ---
+        tab_probe = QWidget()
+        l5 = QVBoxLayout(tab_probe)
+        grp_probe = QGroupBox("Probe Design")
+        gp5 = QFormLayout(grp_probe)
+        self.combo_probe_mode = QComboBox()
+        self.combo_probe_mode.addItems(["Off", "Fallback", "Always"])
+        self.combo_probe_mode.setCurrentText("Fallback")
+        gp5.addRow("Mode:", self.combo_probe_mode)
+
+        self.combo_probe_chemistry = QComboBox()
+        self.combo_probe_chemistry.addItems(["taqman", "taqman_mgb", "molecular_beacon", "rpa_exo"])
+        gp5.addRow("Chemistry:", self.combo_probe_chemistry)
+
+        try:
+            from core.probe_catalog import DYES, QUENCHERS, CHEMISTRY_DEFAULTS, validate_combo
+            dye_names = list(DYES.keys())
+            quencher_names = list(QUENCHERS.keys())
+            self._probe_defaults = CHEMISTRY_DEFAULTS
+            self._validate_probe_combo = validate_combo
+        except Exception:
+            dye_names = ["FAM", "HEX", "ROX", "Cy5"]
+            quencher_names = ["BHQ1", "BHQ2", "BHQ3"]
+            self._probe_defaults = {}
+            self._validate_probe_combo = None
+
+        self.combo_dye = QComboBox()
+        self.combo_dye.addItems(dye_names)
+        gp5.addRow("Dye:", self.combo_dye)
+        self.combo_quencher = QComboBox()
+        self.combo_quencher.addItems(quencher_names)
+        gp5.addRow("Quencher:", self.combo_quencher)
+        self.lbl_probe_combo = QLabel("")
+        gp5.addRow("Compatibility:", self.lbl_probe_combo)
+
+        self.chk_mod_lna = QCheckBox("LNA")
+        self.chk_mod_mgb = QCheckBox("MGB")
+        self.chk_mod_thf = QCheckBox("dSpacer_THF")
+        self.chk_mod_3p = QCheckBox("3p_C3_spacer")
+        mods_row = QWidget()
+        mods_layout = QHBoxLayout(mods_row)
+        mods_layout.setContentsMargins(0, 0, 0, 0)
+        for chk in (self.chk_mod_lna, self.chk_mod_mgb, self.chk_mod_thf, self.chk_mod_3p):
+            mods_layout.addWidget(chk)
+        gp5.addRow("Modifications:", mods_row)
+
+        self.combo_probe_chemistry.currentTextChanged.connect(self._apply_probe_defaults)
+        self.combo_dye.currentTextChanged.connect(self._update_probe_combo_label)
+        self.combo_quencher.currentTextChanged.connect(self._update_probe_combo_label)
+        self._apply_probe_defaults(self.combo_probe_chemistry.currentText())
+
+        l5.addWidget(grp_probe)
+        l5.addStretch()
+        tabs.addTab(tab_probe, "Probe Design")
 
         # ── Buttons ──
         btns = QHBoxLayout()
@@ -292,6 +366,71 @@ class PrimerSettingsDialog(QDialog):
         # Load preset params if given
         if preset_params:
             self.load_preset(preset_params)
+        self._load_probe_settings(self.probe_settings)
+
+    def _apply_probe_defaults(self, chemistry):
+        defaults = self._probe_defaults.get(chemistry, {})
+        dye = defaults.get("dye")
+        quencher = defaults.get("quencher")
+        if dye:
+            idx = self.combo_dye.findText(dye)
+            if idx >= 0:
+                self.combo_dye.setCurrentIndex(idx)
+        if quencher:
+            idx = self.combo_quencher.findText(quencher)
+            if idx >= 0:
+                self.combo_quencher.setCurrentIndex(idx)
+        mods = set(defaults.get("mods", []))
+        self.chk_mod_lna.setChecked("LNA" in mods)
+        self.chk_mod_mgb.setChecked("MGB" in mods)
+        self.chk_mod_thf.setChecked("dSpacer_THF" in mods)
+        self.chk_mod_3p.setChecked("3p_C3_spacer" in mods)
+        self._update_probe_combo_label()
+
+    def _update_probe_combo_label(self):
+        if not self._validate_probe_combo:
+            self.lbl_probe_combo.setText("Not validated")
+            return
+        ok, msg = self._validate_probe_combo(
+            self.combo_dye.currentText(),
+            self.combo_quencher.currentText(),
+        )
+        self.lbl_probe_combo.setText(("OK: " if ok else "Warning: ") + msg)
+
+    def _load_probe_settings(self, settings):
+        if not settings:
+            return
+
+        mode = settings.get("mode")
+        if mode:
+            idx = self.combo_probe_mode.findText(str(mode).title())
+            if idx >= 0:
+                self.combo_probe_mode.setCurrentIndex(idx)
+
+        chemistry = settings.get("chemistry")
+        if chemistry:
+            idx = self.combo_probe_chemistry.findText(str(chemistry))
+            if idx >= 0:
+                self.combo_probe_chemistry.setCurrentIndex(idx)
+
+        dye = settings.get("dye")
+        if dye:
+            idx = self.combo_dye.findText(str(dye))
+            if idx >= 0:
+                self.combo_dye.setCurrentIndex(idx)
+
+        quencher = settings.get("quencher")
+        if quencher:
+            idx = self.combo_quencher.findText(str(quencher))
+            if idx >= 0:
+                self.combo_quencher.setCurrentIndex(idx)
+
+        mods = set(settings.get("modifications", []))
+        self.chk_mod_lna.setChecked("LNA" in mods)
+        self.chk_mod_mgb.setChecked("MGB" in mods)
+        self.chk_mod_thf.setChecked("dSpacer_THF" in mods)
+        self.chk_mod_3p.setChecked("3p_C3_spacer" in mods)
+        self._update_probe_combo_label()
 
     def load_preset(self, params):
         """Populate spinbox values from a METHOD_PARAMS dict."""
@@ -328,6 +467,8 @@ class PrimerSettingsDialog(QDialog):
             "PRIMER_SALT_MONOVALENT": self.sp_na.value(),
             "PRIMER_SALT_DIVALENT": self.sp_mg.value(),
             "PRIMER_DNTP_CONC": self.sp_dntp.value(),
+            "PRIMERY_REQUIRE_3PRIME_MM": self.chk_require_3p.isChecked(),
+            "PRIMERY_THREE_PRIME_WINDOW": self.sp_3p_window.value(),
         }
 
     def get_max_pairs(self):
@@ -344,4 +485,22 @@ class PrimerSettingsDialog(QDialog):
             "database": db_name,
             "entrez_query": self.le_entrez_spec.text().strip(),
             "target_organism": self.le_target_org.text().strip(),
+        }
+
+    def get_probe_settings(self):
+        mods = []
+        if self.chk_mod_lna.isChecked():
+            mods.append("LNA")
+        if self.chk_mod_mgb.isChecked():
+            mods.append("MGB")
+        if self.chk_mod_thf.isChecked():
+            mods.append("dSpacer_THF")
+        if self.chk_mod_3p.isChecked():
+            mods.append("3p_C3_spacer")
+        return {
+            "mode": self.combo_probe_mode.currentText().lower(),
+            "chemistry": self.combo_probe_chemistry.currentText(),
+            "dye": self.combo_dye.currentText(),
+            "quencher": self.combo_quencher.currentText(),
+            "modifications": mods,
         }

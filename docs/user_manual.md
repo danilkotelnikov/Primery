@@ -4,6 +4,31 @@
 
 ---
 
+## New In v0.2.0
+
+Primery now includes the workflow changes below:
+
+- broader NCBI gene discovery with canonical names, aliases, examples, and
+  per-locus FASTA download limits
+- explicit gene/folder selection before BLAST analysis, primer design, probe
+  design, specificity analysis, and mapping
+- editable FASTA sequence views with validation, reverse complement,
+  translation, trimming, and IUPAC motif search
+- mismatch limit modes for species, isolate/strain, genus, and clade/species
+  complex analysis
+- Primer3 design that avoids invalid IUPAC template crashes and favors
+  discriminatory mismatches near the primer 3' end
+- qPCR/TaqMan, MGB-style, molecular beacon, and RPA/exo probe design
+- primer plus probe assay-specificity evaluation
+- nucleotide-resolution primer and probe mapping arrows
+- in-app primer table and specificity report viewers
+- settings for editor, application, analysis, and keyboard behavior
+
+For the recommended workflow and interpretation of new specificity statuses,
+see [Feature Guidelines](feature_guidelines.md).
+
+---
+
 ## Interface Overview
 
 Primery uses a dock-based IDE-style layout built with PySide6. The main window consists of:

@@ -13,6 +13,8 @@ Directory contract:
 import os
 import sys
 import time
+import hashlib
+import json
 from typing import Dict, List, Optional, Tuple, Set
 
 from openpyxl import Workbook
@@ -144,6 +146,7 @@ class BlastAnalyzer:
         megablast: bool = True,
         db: str = "core_nt",
         limit: str = None,
+        excluded_species: List[str] = None,
         force: bool = False,
     ) -> List[Dict]:
         results = []
@@ -156,6 +159,7 @@ class BlastAnalyzer:
                 res = self._analyze_single(
                     path, target_sciname, target_taxid, workspace, gene,
                     max_hits=max_hits, megablast=megablast, force=force,
+                    limit=limit, excluded_species=excluded_species,
                 )
                 results.append(res)
                 gene_groups.setdefault(gene, []).append(res)
@@ -165,7 +169,13 @@ class BlastAnalyzer:
 
         for gene, res_list in gene_groups.items():
             try:
-                self._generate_general_summary(gene, res_list, workspace, target_sciname)
+                self._generate_general_summary(
+                    gene, res_list, workspace, target_sciname,
+                    analysis_scope={
+                        "limit": limit or "Species",
+                        "excluded_species": excluded_species or [],
+                    },
+                )
             except Exception as e:
                 print(f"Failed general summary for {gene}: {e}")
                 import traceback; traceback.print_exc()
@@ -176,6 +186,7 @@ class BlastAnalyzer:
     def _analyze_single(
         self, path, target_sciname, target_taxid, workspace, gene,
         max_hits=200, megablast=True, force=False,
+        limit=None, excluded_species=None,
     ) -> Dict:
         query_header, query_seq = bma.read_first_fasta(path)
         query_acc = bma.derive_accession_from_filename(path)
@@ -184,6 +195,11 @@ class BlastAnalyzer:
             query_seq, database="core_nt", program="blastn",
             hitlist_size=max_hits, expect=expect, megablast=megablast,
         )
+        scope_key = json.dumps(
+            {"limit": limit or "Species", "excluded_species": excluded_species or []},
+            sort_keys=True,
+        )
+        key = f"{key}__scope_{hashlib.sha1(scope_key.encode('utf-8')).hexdigest()[:8]}"
 
         safe_org = target_sciname.replace(" ", "_")
         analysis_dir = os.path.join(workspace, safe_org, "BLAST", gene)
@@ -201,7 +217,7 @@ class BlastAnalyzer:
                 "status": "skipped", "path": xlsx_path,
                 "aligned_fasta": aligned_fasta_path, "raw_zip": raw_zip_path,
                 "file": path, "gene": gene, "accession": query_acc,
-                "seq_len": len(query_seq),
+                "seq_len": len(query_seq), "limit": limit or "Species",
             }
 
         fasta_for_blast = f">{query_header}\n{query_seq}\n"
@@ -240,6 +256,8 @@ class BlastAnalyzer:
             query_seq, hits,
             target_sciname=target_sciname,
             target_taxid=target_taxid if target_taxid else None,
+            limit_mode=limit or "Species",
+            excluded_scinames=set(excluded_species or []),
             max_hits_used=max_hits, min_coverage_frac=min_cov,
         )
 
@@ -251,13 +269,16 @@ class BlastAnalyzer:
             mismatch_species=mismatch_species, hits_rows=hits_rows, top_n=500,
         )
 
-        import json
         done = {
             "analysis_key": key,
             "query_fasta_path": os.path.abspath(path),
             "query_header": query_header, "query_accession": query_acc,
             "gene": gene, "target_sciname": target_sciname,
             "target_taxid": target_taxid,
+            "analysis_scope": {
+                "limit": limit or "Species",
+                "excluded_species": excluded_species or [],
+            },
             "blast": {"database": "core_nt", "program": "blastn",
                       "hitlist_size": max_hits, "expect": expect,
                       "megablast": megablast, "rid": rid},
@@ -274,7 +295,7 @@ class BlastAnalyzer:
             "status": "done", "path": xlsx_path,
             "aligned_fasta": aligned_fasta_path, "raw_zip": raw_zip_path,
             "file": path, "gene": gene, "accession": query_acc,
-            "seq_len": len(query_seq),
+            "seq_len": len(query_seq), "limit": limit or "Species",
         }
 
     # ------------------------------------------------------------------
@@ -282,6 +303,7 @@ class BlastAnalyzer:
     # ------------------------------------------------------------------
     def _generate_general_summary(
         self, gene: str, res_list: List[Dict], workspace: str, organism: str,
+        analysis_scope: Dict = None,
     ):
         """
         Aggregate per-accession mismatch results, find conservative mutations,
@@ -304,10 +326,14 @@ class BlastAnalyzer:
         accession_stats = []
         longest_fasta = {"path": "", "accession": "", "length": 0}
 
-        xlsx_files = glob.glob(os.path.join(out_dir, "*__mismatch_summary.xlsx"))
+        xlsx_files = [r["path"] for r in res_list
+                      if r.get("path") and os.path.exists(r.get("path", ""))]
         if not xlsx_files:
-            xlsx_files = [r["path"] for r in res_list
-                          if r.get("path") and os.path.exists(r.get("path", ""))]
+            xlsx_files = glob.glob(os.path.join(out_dir, "*__mismatch_summary.xlsx"))
+        path_to_acc = {
+            os.path.abspath(r.get("path", "")): r.get("accession", "")
+            for r in res_list if r.get("path")
+        }
 
         for res in res_list:
             sl = res.get("seq_len", 0)
@@ -332,8 +358,11 @@ class BlastAnalyzer:
                 headers = [str(h or "").lower().strip() for h in rows[0]]
                 col = {h: i for i, h in enumerate(headers)}
                 fname = os.path.basename(xlsx_path)
-                parts = fname.split("__")
-                acc = parts[1] if len(parts) >= 3 else fname
+                acc = path_to_acc.get(os.path.abspath(xlsx_path), "")
+                if not acc:
+                    stem = fname.replace("__mismatch_summary.xlsx", "")
+                    parts = stem.split("__")
+                    acc = parts[-1] if len(parts) >= 2 else stem
 
                 total_positions = 0
                 for row in rows[1:]:
@@ -480,6 +509,7 @@ class BlastAnalyzer:
         meta = {
             "gene": gene,
             "organism": organism,
+            "analysis_scope": analysis_scope or {},
             "n_accessions": n_total_acc,
             "longest_fasta": longest_fasta,
             "clusters": [{

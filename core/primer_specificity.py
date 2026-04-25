@@ -6,6 +6,8 @@ Implements Primer-BLAST-like specificity checking using remote NCBI BLAST.
 
 import time
 import os
+import re
+from collections import defaultdict
 from datetime import datetime
 from typing import List, Dict
 from Bio.Blast import NCBIWWW, NCBIXML
@@ -18,12 +20,57 @@ class SpecificityAnalyzer:
     def __init__(self):
         pass
 
+    _COMP = str.maketrans("ACGTRYMKBDHVNacgtrymkbdhvn", "TGCAYRKMVHDBNtgcayrkmvhdbn")
+
+    def _revcomp(self, seq: str) -> str:
+        return str(seq or "").translate(self._COMP)[::-1]
+
+    def _safe_token(self, value: str) -> str:
+        value = str(value or "").strip() or "unknown"
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "unknown"
+
+    def _primer_group_key(self, primer: Dict) -> tuple:
+        gene = primer.get("gene") or "unknown"
+        method = primer.get("method") or primer.get("assay") or "primers"
+        return str(gene), str(method)
+
+    def _read_fasta_sequence(self, text: str) -> str:
+        return "".join(
+            line.strip() for line in str(text or "").splitlines()
+            if line.strip() and not line.startswith(">")
+        ).upper()
+
+    def _fetch_amplicon_sequence(self, acc: str, start: int, end: int, orientation: int, cache: Dict) -> tuple:
+        lo, hi = sorted((max(1, int(start)), max(1, int(end))))
+        key = (acc, lo, hi, orientation)
+        if key in cache:
+            return cache[key]
+        try:
+            handle = Entrez.efetch(
+                db="nuccore",
+                id=acc,
+                rettype="fasta",
+                retmode="text",
+                seq_start=lo,
+                seq_stop=hi,
+            )
+            fasta = handle.read()
+            handle.close()
+            seq = self._read_fasta_sequence(fasta)
+            if orientation == -1:
+                seq = self._revcomp(seq)
+            cache[key] = (seq, "")
+        except Exception as e:
+            cache[key] = ("", str(e))
+        return cache[key]
+
     def run_primer_blast(self, 
                         primers: List[Dict], 
                         database: str = "nt", 
                         organism_filter: str = "",
                         target_organism: str = "",
-                        output_dir: str = None) -> List[Dict]:
+                        output_dir: str = None,
+                        report_name_prefix: str = None) -> List[Dict]:
         """
         Check specificity for a list of primers.
         
@@ -37,16 +84,50 @@ class SpecificityAnalyzer:
             List of primers with added 'specificity' fields.
         """
         results = []
+
+        if output_dir and report_name_prefix is None:
+            groups = defaultdict(list)
+            for p in primers:
+                groups[self._primer_group_key(p)].append(p)
+            if len(groups) > 1:
+                grouped_results = []
+                for (gene, method), group in groups.items():
+                    prefix = (
+                        f"PrimerBLAST_{self._safe_token(gene)}_"
+                        f"{self._safe_token(method)}"
+                    )
+                    grouped_results.extend(self.run_primer_blast(
+                        group,
+                        database=database,
+                        organism_filter=organism_filter,
+                        target_organism=target_organism,
+                        output_dir=output_dir,
+                        report_name_prefix=prefix,
+                    ))
+                return grouped_results
         
         # Parse target genus for classification
         target_genus = target_organism.split()[0] if target_organism else ""
+        sequence_cache = {}
         
         # Prepare Report File
         report_file = None
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_path = os.path.join(output_dir, f"PrimerBLAST_{timestamp}.txt")
+            if report_name_prefix is None:
+                if primers:
+                    gene, method = self._primer_group_key(primers[0])
+                    report_name_prefix = (
+                        f"PrimerBLAST_{self._safe_token(gene)}_"
+                        f"{self._safe_token(method)}"
+                    )
+                else:
+                    report_name_prefix = "PrimerBLAST"
+            report_path = os.path.join(
+                output_dir,
+                f"{self._safe_token(report_name_prefix)}_{timestamp}.txt",
+            )
             try:
                 report_file = open(report_path, "w", encoding="utf-8")
                 report_file.write(f"Primer-BLAST Specificity Report\n")
@@ -172,6 +253,11 @@ class SpecificityAnalyzer:
                             if f['strand'] == 1 and r['strand'] == -1:
                                 dist = r['start'] - f['start']
                                 if 50 < dist < 3000: # Plausible amplicon
+                                    subject_start = min(f['start'], f['end'], r['start'], r['end'])
+                                    subject_end = max(f['start'], f['end'], r['start'], r['end'])
+                                    amp_seq, amp_seq_error = self._fetch_amplicon_sequence(
+                                        acc, subject_start, subject_end, 1, sequence_cache
+                                    )
                                     amplicons.append({
                                         'acc': acc,
                                         'title': f['title'],
@@ -179,13 +265,23 @@ class SpecificityAnalyzer:
                                         'f_mm': f['mismatches'],
                                         'r_mm': r['mismatches'],
                                         'f_3p': f['3_prime_match'],
-                                        'r_3p': r['3_prime_match']
+                                        'r_3p': r['3_prime_match'],
+                                        'subject_start': subject_start,
+                                        'subject_end': subject_end,
+                                        'orientation': 1,
+                                        'sequence': amp_seq,
+                                        'sequence_error': amp_seq_error,
                                     })
                                     
                             # Case 2: Fwd Minus, Rev Plus
                             elif f['strand'] == -1 and r['strand'] == 1:
                                 dist = f['start'] - r['start']
                                 if 50 < dist < 3000:
+                                    subject_start = min(f['start'], f['end'], r['start'], r['end'])
+                                    subject_end = max(f['start'], f['end'], r['start'], r['end'])
+                                    amp_seq, amp_seq_error = self._fetch_amplicon_sequence(
+                                        acc, subject_start, subject_end, -1, sequence_cache
+                                    )
                                     amplicons.append({
                                         'acc': acc,
                                         'title': f['title'],
@@ -193,7 +289,12 @@ class SpecificityAnalyzer:
                                         'f_mm': f['mismatches'],
                                         'r_mm': r['mismatches'],
                                         'f_3p': f['3_prime_match'],
-                                        'r_3p': r['3_prime_match']
+                                        'r_3p': r['3_prime_match'],
+                                        'subject_start': subject_start,
+                                        'subject_end': subject_end,
+                                        'orientation': -1,
+                                        'sequence': amp_seq,
+                                        'sequence_error': amp_seq_error,
                                     })
 
                 # 5. Classify Amplicons
@@ -216,6 +317,8 @@ class SpecificityAnalyzer:
                         
                         is_target_species = org_lower in title_lower
                         is_target_genus = genus_lower in title_lower
+                        amp['is_target_species'] = is_target_species
+                        amp['is_target_genus'] = is_target_genus
                         
                         # A valid PCR product usually requires good 3' matches
                         # If 3' doesn't match, amplification is inefficient.
@@ -267,6 +370,7 @@ class SpecificityAnalyzer:
                 p['specificity_status'] = status
                 p['target_hits'] = target_hits
                 p['off_target_hits'] = off_target_hits
+                p['amplicons'] = amplicons
                 
             except Exception as e:
                 p['specificity_status'] = f"Error: {str(e)}"

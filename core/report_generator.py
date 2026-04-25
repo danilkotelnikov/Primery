@@ -34,11 +34,15 @@ C_RULE         = "#CCCCCC"   # grid lines
 C_TEXT_DARK    = "#1A1A1A"
 C_GOLD         = "#C9A84C"   # decorative accent line under title
 
-# Google Sans Flex variable font (user-installed)
-_GSANS_PATH = (
+_BUNDLED_GSANS = os.path.join(
+    _here, "assets", "fonts",
+    "GoogleSansFlex-VariableFont_GRAD,ROND,opsz,slnt,wdth,wght.ttf",
+)
+_USER_GSANS = (
     r"C:\Users\danil\AppData\Local\Microsoft\Windows\Fonts"
     r"\GoogleSansFlex-VariableFont_GRAD,ROND,opsz,slnt,wdth,wght.ttf"
 )
+_GSANS_PATH = _BUNDLED_GSANS if os.path.isfile(_BUNDLED_GSANS) else _USER_GSANS
 _FONTS_AVAILABLE = os.path.isfile(_GSANS_PATH)
 
 
@@ -64,6 +68,7 @@ class ReportDataCollector:
             "reference": {},
             "clusters": [],
             "primer_sets": [],
+            "probe_sets": [],
             "specificity": [],
             "specificity_table": [],   # parsed rows for the table
         }
@@ -104,8 +109,12 @@ class ReportDataCollector:
 
         # --- Primer sets ---
         primer_files = glob.glob(os.path.join(blast_dir, f"{gene}_*_primers.json"))
+        primer_file_re = re.compile(rf"^{re.escape(gene)}_(.+?)_primers\.json$")
         for pf in primer_files:
-            method = os.path.basename(pf).replace(f"{gene}_", "").replace("_primers.json", "")
+            match = primer_file_re.match(os.path.basename(pf))
+            if not match:
+                continue
+            method = match.group(1)
             with open(pf, "r", encoding="utf-8") as f:
                 pairs = json.load(f)
             primer_set = {"method": method.upper(), "pairs": []}
@@ -127,9 +136,44 @@ class ReportDataCollector:
                 })
             data["primer_sets"].append(primer_set)
 
+        # --- Probe sets ---
+        flat_probe_files = glob.glob(os.path.join(blast_dir, f"{gene}_*_probes.json"))
+        nested_probe_files = glob.glob(os.path.join(blast_dir, "Probes", "**", f"{gene}_*_probes.json"), recursive=True)
+        probe_file_map = {os.path.basename(p): p for p in sorted(flat_probe_files)}
+        for path in sorted(nested_probe_files):
+            probe_file_map[os.path.basename(path)] = path
+        probe_files = list(probe_file_map.values())
+        probe_file_re = re.compile(rf"^{re.escape(gene)}_(.+?)_probes\.json$")
+        for pf in probe_files:
+            match = probe_file_re.match(os.path.basename(pf))
+            if not match:
+                continue
+            chemistry = match.group(1)
+            with open(pf, "r", encoding="utf-8") as f:
+                probes = json.load(f)
+            data["probe_sets"].append({
+                "chemistry": chemistry.upper(),
+                "probes": probes if isinstance(probes, list) else [probes],
+            })
+
         # --- Specificity reports ---
         if os.path.isdir(spec_dir):
+            safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", gene).strip("_")
+            named_report_re = re.compile(
+                rf"^PrimerBLAST_{re.escape(safe_gene)}_(.+?)_\d{{8}}_\d{{6}}\.txt$"
+            )
+            generic_report_re = re.compile(r"^PrimerBLAST_\d{8}_\d{6}\.txt$")
             for sf in sorted(glob.glob(os.path.join(spec_dir, "PrimerBLAST_*.txt"))):
+                sf_name = os.path.basename(sf)
+                source_method = ""
+                method_match = named_report_re.match(sf_name)
+                if method_match:
+                    source_method = method_match.group(1).upper()
+                elif not generic_report_re.match(sf_name):
+                    # New per-gene reports for other genes should not bleed into
+                    # this gene's primer tables. Keep legacy timestamp-only
+                    # reports readable.
+                    continue
                 with open(sf, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
 
@@ -146,7 +190,7 @@ class ReportDataCollector:
                 spec_rows = _parse_specificity_rows(content)
 
                 data["specificity"].append({
-                    "file":      os.path.basename(sf),
+                    "file":      sf_name,
                     "summary":   "\n".join(summary_lines[:30]) if summary_lines else "",
                     "full_path": sf,
                     "rows":      spec_rows,
@@ -154,7 +198,8 @@ class ReportDataCollector:
 
                 # Flat list for the combined table
                 for row in spec_rows:
-                    row["source_file"] = os.path.basename(sf)
+                    row["source_file"] = sf_name
+                    row["method"] = source_method
                     data["specificity_table"].append(row)
 
         return data
@@ -195,6 +240,82 @@ def _parse_specificity_rows(content):
                 current["mismatches"] = m6.group(1).strip()
     if current:
         rows.append(current)
+    return rows
+
+
+def _rank_number(label):
+    """Extract the pair rank without mixing in digits from gene names (COX1_Rank1)."""
+    label = str(label or "")
+    m = re.search(r"(?:^|[_\s-])Rank\s*([0-9]+)\b", label, re.I)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"\s*#?\s*([0-9]+)\s*", label)
+    if m:
+        return m.group(1)
+    m = re.search(r"\bPair\s*([0-9]+)\b", label, re.I)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _specificity_by_rank(data, method):
+    method = str(method or "").lower()
+    spec_by_rank = {}
+    for row in data.get("specificity_table", []):
+        row_method = str(row.get("method") or "").lower()
+        if row_method and method and row_method != method:
+            continue
+        rk_num = _rank_number(row.get("rank", ""))
+        if rk_num:
+            spec_by_rank[rk_num] = row
+    return spec_by_rank
+
+
+def _summary_rows(data):
+    rows = []
+    for ps in data.get("primer_sets", []):
+        spec_by_rank = _specificity_by_rank(data, ps.get("method", ""))
+        for p in ps.get("pairs", []):
+            rank = str(p.get("rank", ""))
+            spec = spec_by_rank.get(rank, {})
+            rows.append({
+                "method": ps.get("method", ""),
+                "rank": rank,
+                "type": "Forward primer",
+                "sequence": p.get("fwd_seq", ""),
+                "tm": p.get("fwd_tm", ""),
+                "position": f"{p.get('fwd_pos', '')}+{p.get('fwd_len', '')}",
+                "cluster": p.get("fwd_cluster", ""),
+                "mod": "",
+                "specificity": spec.get("status", ""),
+                "off_targets": spec.get("off_target_hits", ""),
+            })
+            rows.append({
+                "method": ps.get("method", ""),
+                "rank": rank,
+                "type": "Reverse primer",
+                "sequence": p.get("rev_seq", ""),
+                "tm": p.get("rev_tm", ""),
+                "position": f"{p.get('rev_pos', '')}+{p.get('rev_len', '')}",
+                "cluster": p.get("rev_cluster", ""),
+                "mod": "",
+                "specificity": spec.get("status", ""),
+                "off_targets": spec.get("off_target_hits", ""),
+            })
+    for ps in data.get("probe_sets", []):
+        for p in ps.get("probes", []):
+            rows.append({
+                "method": ps.get("chemistry", ""),
+                "rank": p.get("rank", ""),
+                "type": "Probe",
+                "sequence": p.get("sequence", ""),
+                "tm": p.get("tm", ""),
+                "position": f"{p.get('start', 0) + 1}-{p.get('end', 0) + 1}",
+                "cluster": ",".join(str(x) for x in p.get("mismatch_positions", [])),
+                "mod": f"{p.get('dye', '')}/{p.get('quencher', '')}; " + ", ".join(p.get("modifications", [])),
+                "specificity": f"{p.get('mm_covered', 0)} mismatches",
+                "off_targets": p.get("n_species", ""),
+            })
     return rows
 
 
@@ -344,6 +465,30 @@ def generate_pdf(all_data, output_path, screenshot_path=None):
             width="100%", thickness=0.8,
             color=HexColor(C_GREEN_MID), spaceAfter=10))
 
+        # -- 0. Summary -------------------------------------------------------
+        summary = _summary_rows(data)
+        if summary:
+            story.append(Paragraph("0. Summary", sty["SectionH"]))
+            sm_rows = [["Method", "#", "Type", "Sequence", "Tm", "Position", "Cluster/MM", "Mod", "Specificity", "Off-targets"]]
+            for row in summary:
+                sm_rows.append([
+                    str(row["method"]),
+                    str(row["rank"]),
+                    row["type"],
+                    Paragraph(str(row["sequence"]), sty["CellMono"]),
+                    str(row["tm"]),
+                    str(row["position"]),
+                    str(row["cluster"]),
+                    Paragraph(str(row["mod"]), sty["Cell"]),
+                    str(row["specificity"]),
+                    str(row["off_targets"]),
+                ])
+            cw0 = [page_w * x for x in [0.09, 0.035, 0.11, 0.245, 0.055, 0.08, 0.08, 0.13, 0.105, 0.07]]
+            t0 = Table(sm_rows, colWidths=cw0, repeatRows=1)
+            t0.setStyle(_tblstyle(C_SPEC_DARK, C_SPEC_LIGHT, font_size=6.8))
+            story.append(t0)
+            story.append(Spacer(1, 8))
+
         # ── 1. Gene Information ───────────────────────────────────────────────
         ref = data.get("reference", {})
         story.append(Paragraph("1. Gene Information", sty["SectionH"]))
@@ -383,13 +528,8 @@ def generate_pdf(all_data, output_path, screenshot_path=None):
             story.append(Paragraph(
                 f"{sn}. Primer Pairs &mdash; {ps['method']}", sty["SectionH"]))
 
-            # Build a lookup: rank → specificity status (from the flat table)
-            spec_by_rank = {}
-            for row in data.get("specificity_table", []):
-                rk = row.get("rank", "")
-                # "Rank1" → "1", handle both "Rank1" and "1"
-                rk_num = re.sub(r"[^0-9]", "", rk)
-                spec_by_rank[rk_num] = row
+            # Build a lookup: rank -> specificity status scoped to this method.
+            spec_by_rank = _specificity_by_rank(data, ps["method"])
 
             pr_rows = [["#", "Forward 5'→3'", "Tm°C", "Reverse 5'→3'", "Tm°C",
                          "Product\n(bp)", "Fwd\nClust.", "Rev\nClust.", "Spp.", "Specificity"]]
@@ -436,9 +576,35 @@ def generate_pdf(all_data, output_path, screenshot_path=None):
             story.append(t)
             story.append(Spacer(1, 10))
 
+        if data.get("probe_sets"):
+            sn = 2 + len(data["primer_sets"]) + 1
+            story.append(Paragraph(f"{sn}. Probes", sty["SectionH"]))
+            for ps in data["probe_sets"]:
+                story.append(Paragraph(ps.get("chemistry", "PROBE"), sty["SubH"]))
+                prb_rows = [["#", "Chemistry", "Dye", "Quencher", "Mods", "Sequence", "Tm", "Pos", "MM", "Spp.", "Rationale"]]
+                for p in ps.get("probes", []):
+                    prb_rows.append([
+                        str(p.get("rank", "")),
+                        p.get("chemistry", ps.get("chemistry", "")),
+                        p.get("dye", ""),
+                        p.get("quencher", ""),
+                        Paragraph(", ".join(p.get("modifications", [])), sty["Cell"]),
+                        Paragraph(p.get("sequence", ""), sty["CellMono"]),
+                        str(p.get("tm", "")),
+                        f"{p.get('start', 0) + 1}-{p.get('end', 0) + 1}",
+                        str(p.get("mm_covered", "")),
+                        str(p.get("n_species", "")),
+                        Paragraph(p.get("rationale", ""), sty["Cell"]),
+                    ])
+                cw_probe = [page_w * x for x in [0.035, 0.08, 0.045, 0.065, 0.11, 0.25, 0.045, 0.07, 0.04, 0.04, 0.22]]
+                tp = Table(prb_rows, colWidths=cw_probe, repeatRows=1)
+                tp.setStyle(_tblstyle(C_BLUE_DARK, C_BLUE_LIGHT, font_size=6.8))
+                story.append(tp)
+                story.append(Spacer(1, 8))
+
         # ── Specificity Summary Table ─────────────────────────────────────────
         if data.get("specificity_table"):
-            sn = 2 + len(data["primer_sets"]) + 1
+            sn = 2 + len(data["primer_sets"]) + (1 if data.get("probe_sets") else 0) + 1
             story.append(Paragraph(
                 f"{sn}. Primer Specificity (BLAST)", sty["SectionH"]))
 
@@ -714,6 +880,22 @@ def generate_docx(all_data, output_path, screenshot_path=None):
 
         _add_rule(doc, color_hex=C_GREEN_MID.lstrip("#"), thickness_pt=0.8)
 
+        summary = _summary_rows(data)
+        if summary:
+            doc.add_heading("0. Summary", level=2)
+            _add_table(
+                doc,
+                ["Method", "#", "Type", "Sequence", "Tm", "Position", "Cluster/MM", "Mod", "Specificity", "Off-targets"],
+                [[
+                    r["method"], r["rank"], r["type"], r["sequence"], r["tm"],
+                    r["position"], r["cluster"], r["mod"], r["specificity"], r["off_targets"],
+                ] for r in summary],
+                hdr_hex=C_SPEC_DARK,
+                row_tint=C_SPEC_LIGHT,
+                col_widths=[content_width_cm * x for x in [0.09, 0.04, 0.11, 0.25, 0.05, 0.08, 0.08, 0.13, 0.10, 0.07]],
+            )
+            doc.add_paragraph("")
+
         # ── 1. Gene Information ───────────────────────────────────────────────
         doc.add_heading("1. Gene Information", level=2)
         ref = data.get("reference", {})
@@ -745,15 +927,10 @@ def generate_docx(all_data, output_path, screenshot_path=None):
             doc.add_paragraph("")
 
         # ── 3+. Primer Pairs ─────────────────────────────────────────────────
-        # Build specificity lookup
-        spec_by_rank = {}
-        for row in data.get("specificity_table", []):
-            rk_num = re.sub(r"[^0-9]", "", row.get("rank", ""))
-            spec_by_rank[rk_num] = row
-
         for ps_idx, ps in enumerate(data["primer_sets"], 1):
             sn = 2 + ps_idx
             doc.add_heading(f"{sn}. Primer Pairs — {ps['method']}", level=2)
+            spec_by_rank = _specificity_by_rank(data, ps["method"])
 
             hdrs = ["#", "Forward 5'→3'", "Tm°C", "Reverse 5'→3'", "Tm°C",
                     "Product (bp)", "Fwd Cl.", "Rev Cl.", "Spp.", "Specificity"]
@@ -839,9 +1016,36 @@ def generate_docx(all_data, output_path, screenshot_path=None):
 
             doc.add_paragraph("")
 
+        if data.get("probe_sets"):
+            sn = 2 + len(data["primer_sets"]) + 1
+            doc.add_heading(f"{sn}. Probes", level=2)
+            for ps in data["probe_sets"]:
+                doc.add_heading(ps.get("chemistry", "PROBE"), level=3)
+                _add_table(
+                    doc,
+                    ["#", "Chemistry", "Dye", "Quencher", "Mods", "Sequence", "Tm", "Pos", "MM", "Spp.", "Rationale"],
+                    [[
+                        p.get("rank", ""),
+                        p.get("chemistry", ps.get("chemistry", "")),
+                        p.get("dye", ""),
+                        p.get("quencher", ""),
+                        ", ".join(p.get("modifications", [])),
+                        p.get("sequence", ""),
+                        p.get("tm", ""),
+                        f"{p.get('start', 0) + 1}-{p.get('end', 0) + 1}",
+                        p.get("mm_covered", ""),
+                        p.get("n_species", ""),
+                        p.get("rationale", ""),
+                    ] for p in ps.get("probes", [])],
+                    hdr_hex=C_BLUE_DARK,
+                    row_tint=C_BLUE_LIGHT,
+                    col_widths=[content_width_cm * x for x in [0.04, 0.08, 0.05, 0.07, 0.11, 0.24, 0.05, 0.07, 0.04, 0.04, 0.21]],
+                )
+            doc.add_paragraph("")
+
         # ── Specificity Summary Table ─────────────────────────────────────────
         if data.get("specificity_table"):
-            sn = 2 + len(data["primer_sets"]) + 1
+            sn = 2 + len(data["primer_sets"]) + (1 if data.get("probe_sets") else 0) + 1
             doc.add_heading(f"{sn}. Primer Specificity (BLAST)", level=2)
 
             # Group by source file

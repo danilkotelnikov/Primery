@@ -9,6 +9,8 @@ import os
 # Ensure the project root is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+APP_VERSION = "0.2.0"
+
 from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout,
                                 QPushButton, QLabel, QSpacerItem, QSizePolicy)
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
@@ -16,15 +18,22 @@ from PySide6.QtCore import Qt
 from PySide6.QtSvgWidgets import QSvgWidget
 
 
-def _load_inter_bold():
-    """Load bundled Inter-Bold.ttf and return the family name, or fallback."""
-    font_path = os.path.join(os.path.dirname(__file__), "assets", "fonts", "Inter-Bold.ttf")
-    if os.path.isfile(font_path):
-        fid = QFontDatabase.addApplicationFont(font_path)
-        families = QFontDatabase.applicationFontFamilies(fid)
-        if families:
-            return families[0]
-    return "Segoe UI"   # fallback
+def _load_start_font():
+    """Prefer Google Sans Flex, then bundled Inter, then the platform UI font."""
+    root = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(root, "assets", "fonts", "GoogleSansFlex-VariableFont_GRAD,ROND,opsz,slnt,wdth,wght.ttf"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts",
+                     "GoogleSansFlex-VariableFont_GRAD,ROND,opsz,slnt,wdth,wght.ttf"),
+        os.path.join(root, "assets", "fonts", "Inter-Bold.ttf"),
+    ]
+    for font_path in candidates:
+        if os.path.isfile(font_path):
+            fid = QFontDatabase.addApplicationFont(font_path)
+            families = QFontDatabase.applicationFontFamilies(fid)
+            if families:
+                return families[0]
+    return "Segoe UI"
 
 
 class StartScreen(QDialog):
@@ -54,7 +63,7 @@ class StartScreen(QDialog):
             layout.addWidget(svg)
         else:
             self.setStyleSheet("background: white;")
-            lbl = QLabel("Primery")
+            lbl = QLabel(f"Primery {APP_VERSION}")
             lbl.setFont(QFont(font_family, 44))
             lbl.setStyleSheet("color: #184F27;")
             lbl.setAlignment(Qt.AlignCenter)
@@ -62,25 +71,27 @@ class StartScreen(QDialog):
 
         # Start button overlaid at the bottom center
         self.btn_start = QPushButton("Start", self)
-        self.btn_start.setFixedSize(160, 46)
+        self.btn_start.setFixedSize(190, 52)
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.setFont(QFont(font_family, 16))
         self.btn_start.setStyleSheet(f"""
             QPushButton {{
-                background-color: #216635;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                            stop:0 #2E7D4F, stop:1 #0D3B6E);
                 color: white;
                 border: none;
-                border-radius: 10px;
+                border-radius: 8px;
                 font-family: '{font_family}';
-                font-size: 16px;
-                font-weight: bold;
-                letter-spacing: 2px;
+                font-size: 17px;
+                font-weight: 600;
+                letter-spacing: 0px;
             }}
             QPushButton:hover {{
-                background-color: #2a8045;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                            stop:0 #37945E, stop:1 #104A86);
             }}
             QPushButton:pressed {{
-                background-color: #184F27;
+                background: #184F27;
             }}
         """)
         self.btn_start.clicked.connect(self.accept)
@@ -103,7 +114,7 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
-    font_family = _load_inter_bold()
+    font_family = _load_start_font()
 
     start = StartScreen(font_family)
     if start.exec() != QDialog.Accepted:

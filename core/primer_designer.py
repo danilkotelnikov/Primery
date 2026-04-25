@@ -40,6 +40,37 @@ METHOD_PARAMS = {
               "min_tm": 58.0, "opt_tm": 62.0, "max_tm": 68.0},
 }
 
+_PRIMER3_TEMPLATE_BASES = set("ACGTN")
+
+
+def _sanitize_template(seq: str) -> Tuple[str, int]:
+    """Return a Primer3-safe template and count non-ACGTN IUPAC bases."""
+    clean = []
+    n_ambiguous = 0
+    for base in (seq or "").upper():
+        if base in _PRIMER3_TEMPLATE_BASES:
+            clean.append(base)
+        elif base.isalpha():
+            clean.append("N")
+            n_ambiguous += 1
+    return "".join(clean), n_ambiguous
+
+
+def _excluded_n_regions(seq: str) -> List[List[int]]:
+    """Contiguous N blocks for Primer3 SEQUENCE_EXCLUDED_REGION."""
+    regions = []
+    start = None
+    for i, base in enumerate(seq):
+        if base == "N":
+            if start is None:
+                start = i
+        elif start is not None:
+            regions.append([start, i - start])
+            start = None
+    if start is not None:
+        regions.append([start, len(seq) - start])
+    return regions
+
 
 def _cluster_for_primers(positions: List[int], primer_len: int) -> List[List[int]]:
     """
@@ -71,6 +102,8 @@ class PrimerDesigner:
         n_top: int = 10,
         n_cluster_pairs: int = 20,
         custom_settings: Dict = None,
+        require_3prime_mm: bool = True,
+        three_prime_window: int = 3,
     ) -> List[Dict]:
         """
         Cluster-pair primer design.
@@ -82,6 +115,10 @@ class PrimerDesigner:
             n_per_pair: candidates to request from Primer3 per cluster pair
             n_top: total top non-repeating primers to return
             custom_settings: optional Primer3 overrides
+            require_3prime_mm: discard pairs where either primer does not place
+                a species-discriminating mismatch near its 3' end.
+            three_prime_window: allowed distance from the 3' terminal base
+                (0 means terminal base only; 3 allows offsets 0..3).
         """
         if not primer3:
             raise ImportError("primer3-py not installed")
@@ -90,6 +127,13 @@ class PrimerDesigner:
         params = METHOD_PARAMS.get(mode_lc, METHOD_PARAMS["pcr"])
         primer_max_len = params["max_size"]
         product_min, product_max = params["product"]
+        template_seq, n_ambiguous = _sanitize_template(seq)
+        excluded_regions = _excluded_n_regions(template_seq)
+        if n_ambiguous:
+            print(
+                f"  Template contains {n_ambiguous} non-ACGTN IUPAC base(s); "
+                "Primer3 template sanitized to N and N regions excluded."
+            )
 
         # --- Re-cluster using method-specific primer_max_len ---
         # Extract all mismatch positions from the clusters
@@ -105,7 +149,7 @@ class PrimerDesigner:
                 pos_species.setdefault(p, set()).update(sp_set)
 
         if not all_positions:
-            return self._design_unclustered(seq, mode, n_return=n_top,
+            return self._design_unclustered(template_seq, mode, n_return=n_top,
                                             custom_settings=custom_settings)
 
         reclustered = _cluster_for_primers(all_positions, primer_max_len)
@@ -163,7 +207,8 @@ class PrimerDesigner:
         settings = self._build_primer3_settings(params, custom_settings)
         all_candidates = []
 
-        seq_len = len(seq)
+        seq_len = len(template_seq)
+        primer3_errors = {}
         for vp in valid_pairs[:n_cluster_pairs]:
             fwd_cl = vp["fwd"]
             rev_cl = vp["rev"]
@@ -189,35 +234,49 @@ class PrimerDesigner:
             pair_settings["PRIMER_NUM_RETURN"] = n_per_pair
 
             try:
+                seq_args = {
+                    "SEQUENCE_ID": f"fwd{fwd_cl['id']}_rev{rev_cl['id']}",
+                    "SEQUENCE_TEMPLATE": template_seq,
+                    "SEQUENCE_PRIMER_PAIR_OK_REGION_LIST": [
+                        [fwd_region_start, fwd_region_len,
+                         rev_region_start, rev_region_len],
+                    ],
+                }
+                if excluded_regions:
+                    seq_args["SEQUENCE_EXCLUDED_REGION"] = excluded_regions
                 results = primer3.design_primers(
-                    {
-                        "SEQUENCE_ID": f"fwd{fwd_cl['id']}_rev{rev_cl['id']}",
-                        "SEQUENCE_TEMPLATE": seq,
-                        "SEQUENCE_PRIMER_PAIR_OK_REGION_LIST": [
-                            [fwd_region_start, fwd_region_len,
-                             rev_region_start, rev_region_len],
-                        ],
-                    },
+                    seq_args,
                     pair_settings,
                 )
             except Exception as e:
-                print(f"  Primer3 error for pair {fwd_cl['id']}+{rev_cl['id']}: {e}")
+                msg = str(e).splitlines()[0]
+                primer3_errors[msg] = primer3_errors.get(msg, 0) + 1
                 continue
 
             count = results.get("PRIMER_PAIR_NUM_RETURNED", 0)
             for i in range(count):
                 try:
                     pair = self._extract_pair(
-                        results, i, seq,
+                        results, i, template_seq,
                         fwd_cluster=fwd_cl, rev_cluster=rev_cl,
                         union_species=vp["union_species"],
                         pos_species=pos_species,
+                        require_3prime_mm=require_3prime_mm,
+                        three_prime_window=three_prime_window,
                     )
+                    if pair is None:
+                        continue
                     all_candidates.append(pair)
                 except (KeyError, IndexError):
                     continue
 
         # --- Global ranking and non-repeating selection ---
+        if primer3_errors:
+            summary = "; ".join(
+                f"{count}x {msg}" for msg, count in sorted(primer3_errors.items())
+            )
+            print(f"  Primer3 rejected {sum(primer3_errors.values())} cluster pair(s): {summary}")
+
         all_candidates.sort(key=lambda x: (-x["score"], x["thermal_penalty"]))
 
         picked = []
@@ -240,6 +299,8 @@ class PrimerDesigner:
         fwd_cluster: Dict, rev_cluster: Dict,
         union_species: Set[str],
         pos_species: Dict[int, Set[str]],
+        require_3prime_mm: bool = True,
+        three_prime_window: int = 3,
     ) -> Dict:
         """Extract, score, and annotate a primer pair from Primer3 output."""
         left_seq  = results[f"PRIMER_LEFT_{i}_SEQUENCE"]
@@ -290,16 +351,27 @@ class PrimerDesigner:
         # Mismatch coverage
         score += total_mm * 5.0
 
-        # 3' end bonus (critical for specificity — mismatches at 3' prevent extension)
+        # 3' end offset: mismatches closest to the terminal base are most useful
+        # for allele/species discrimination because polymerase extension is then
+        # disfavored on non-target templates.
+        fwd_3p_mm_offset = None
         left_3prime = left_pos + left_len - 1  # 0-based
-        for offset in range(3):
+        for offset in range(max(0, three_prime_window) + 1):
             if (left_3prime - offset) in fwd_mm_0:
+                fwd_3p_mm_offset = offset
                 score += 15.0 if offset == 0 else 5.0
+                break
 
+        rev_3p_mm_offset = None
         right_3prime = r_phys_start  # 3' end of reverse on plus strand
-        for offset in range(3):
+        for offset in range(max(0, three_prime_window) + 1):
             if (right_3prime + offset) in rev_mm_0:
+                rev_3p_mm_offset = offset
                 score += 15.0 if offset == 0 else 5.0
+                break
+
+        if require_3prime_mm and (fwd_3p_mm_offset is None or rev_3p_mm_offset is None):
+            return None
 
         # Thermal penalty (lower is better)
         worst_hairpin = max(left_hairpin, right_hairpin)
@@ -330,6 +402,10 @@ class PrimerDesigner:
             "primer3_penalty": round(penalty, 2),
             "fwd_mm_covered": fwd_mm_count,
             "rev_mm_covered": rev_mm_count,
+            "fwd_mismatch_positions": sorted(p + 1 for p in fwd_hits),
+            "rev_mismatch_positions": sorted(p + 1 for p in rev_hits),
+            "fwd_3p_mm_offset": fwd_3p_mm_offset,
+            "rev_3p_mm_offset": rev_3p_mm_offset,
             "total_mm_covered": total_mm,
             "n_species_covered": len(covered_species),
             "score": round(score, 1),
@@ -355,11 +431,21 @@ class PrimerDesigner:
         """Fallback when no valid cluster pairs found."""
         mode_lc = mode.lower()
         params = METHOD_PARAMS.get(mode_lc, METHOD_PARAMS["pcr"])
+        seq, n_ambiguous = _sanitize_template(seq)
+        excluded_regions = _excluded_n_regions(seq)
+        if n_ambiguous:
+            print(
+                f"  Template contains {n_ambiguous} non-ACGTN IUPAC base(s); "
+                "Primer3 template sanitized to N and N regions excluded."
+            )
         settings = self._build_primer3_settings(params, custom_settings)
         settings["PRIMER_NUM_RETURN"] = n_return * 5
 
+        seq_args = {"SEQUENCE_ID": "target", "SEQUENCE_TEMPLATE": seq}
+        if excluded_regions:
+            seq_args["SEQUENCE_EXCLUDED_REGION"] = excluded_regions
         results = primer3.design_primers(
-            {"SEQUENCE_ID": "target", "SEQUENCE_TEMPLATE": seq}, settings,
+            seq_args, settings,
         )
         pairs = []
         count = results.get("PRIMER_PAIR_NUM_RETURNED", 0)
@@ -382,6 +468,7 @@ class PrimerDesigner:
                     "product_size": results.get(f"PRIMER_PAIR_{i}_PRODUCT_SIZE", 0),
                     "primer3_penalty": round(results.get(f"PRIMER_PAIR_{i}_PENALTY", 0), 2),
                     "fwd_mm_covered": 0, "rev_mm_covered": 0,
+                    "fwd_3p_mm_offset": None, "rev_3p_mm_offset": None,
                     "total_mm_covered": 0, "n_species_covered": 0, "score": 0,
                 })
             except KeyError:
@@ -399,7 +486,7 @@ class PrimerDesigner:
 
     def _build_primer3_settings(self, params: Dict, custom: Dict = None) -> Dict:
         settings = {
-            "PRIMER_MAX_NS_ACCEPTED": 1,
+            "PRIMER_MAX_NS_ACCEPTED": 0,
             "PRIMER_TM_FORMULA": 1,
             "PRIMER_SALT_CORRECTIONS": 1,
             "PRIMER_MIN_SIZE": params["min_size"],
@@ -411,5 +498,8 @@ class PrimerDesigner:
             "PRIMER_PRODUCT_SIZE_RANGE": [params["product"]],
         }
         if custom:
-            settings.update(custom)
+            settings.update({
+                k: v for k, v in custom.items()
+                if not str(k).startswith("PRIMERY_")
+            })
         return settings
