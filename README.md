@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/Logo.png" width="128" height="128" alt="Primery logo">
+</p>
+
 # Primery — Species-Specific Primer Design
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
